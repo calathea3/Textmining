@@ -1,0 +1,396 @@
+---
+output: 
+  html_document: 
+    keep_md: yes
+    toc: yes
+---
+# Textminig: An N-Gram model to predict the next word
+
+This code helps to read in the source data and calculate the scores for all ngrams according to the Stupid Backoff Alorithm. The result is three inputfiles for the shiny application.
+
+## Load packages
+```{r, message=FALSE}
+library(tm)
+library(ngram)
+library(data.table)
+library(ggplot2)
+```
+
+## Download data
+fileurl <- "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip" 
+
+profanityurl <- https://www.freewebheaders.com/download/files/full-list-of-bad-words_text-file_2018_07_30.zip
+
+
+## Summary of all data
+In total the three source files hold about 4 millions of rows with about 100 millions of words.
+
+Type      | Filename        | Number of rows | Number of words |Avg number of words per row
+----------|-----------------|----------------|-----------------|----------------------------
+blogs     |en_US.blogs.txt  |   899.288      | 37,334.131      | 41.5
+news      |en_US.news.txt   | 1,010.242      | 34,372.530      | 34.0   
+twitter   |en_US.twitter.txt| 2,360.148      | 30,373.543      | 12.9
+
+
+##Load only twitter and news
+```{r}
+file2 <- "en_US.news.txt"
+file3 <- "en_US.twitter.txt"
+file4 <- "full-list-of-bad-words_text-file_2018_07_30.txt"
+
+con <- file(file2, open ="rb")   
+news <- readLines(con, encoding = "UTF-8")                    
+close(con)                                   
+news <- iconv(news, from = "latin1", to = "UTF-8", sub="") ## delete not UTF-8 characters
+
+con <- file(file3, open ="rb")                     
+twitter <- readLines(con, encoding = "UTF-8")                    
+close(con)
+twitter <- iconv(twitter, from = "latin1", to = "UTF-8", sub="") ## delete not UTF-8 characters
+
+profanitywords <- read.delim(file4,header=FALSE,skip=13,encoding = "UTF-8" )
+
+```
+
+```{r}
+blogsnrrows <- length(blogs)
+newsnrrows <- length(news)
+twitternrrows <- length(twitter)
+
+blogsnrwords <- wordcount(blogs)
+newsnrwords <- wordcount(news)
+twitternrwords <- wordcount(twitter)
+
+blogsnrwordsavg <- wordcount(blogs,count.function=mean)
+newsnrwordsavg <- wordcount(news,count.function=mean)
+twitternrwordsavg <- wordcount(twitter,count.function=mean)
+```
+
+### Sample data for development trials
+
+absolute
+```{r}
+set.seed(317)
+samplesize <- 20000
+
+sblog <- sample(blog,samplesize)
+snews <- sample(news,samplesize)
+stwit <- sample(twit,samplesize)
+```
+
+or
+
+relative
+
+```{r}
+set.seed(317)
+sampleperc <- 0.25
+
+sampledata<-c( sample(news,length(news)*sampleperc),
+               sample(twitter,length(twitter)*sampleperc))
+```
+
+### Split sample data
+
+```{r}
+    data <- sampledata
+    data.index <- 1:length(data)
+
+ #if not sampled then data is 
+ data <- rbind(news, twitter)
+
+    # Sample indices for the training data set, and create a set with remaining indices.
+    training.index <- sample(data.index, 0.8 * length(data.index))
+    remaining.index <- data.index[! data.index %in% training.index]
+
+    # Sample indices for the testing data set, and use remaining indices
+    # for a validation data set.
+    testing.index <- sample(remaining.index, 0.5 * length(remaining.index))
+    validation.index <- remaining.index[! remaining.index %in% testing.index]
+
+    # Split the data.
+    traindata <- data[training.index]
+    testdata <- data[testing.index]
+    validationdata <- data[validation.index]
+
+rm(validationdata)
+rm(validation.index)
+rm(training.index)
+rm(testing.index)
+rm(remaining.index)
+rm(data.index)
+
+rm(news)
+rm(twitter)
+rm(sampledata)
+```
+
+## Create corpus database
+To be able to work with a lot of data 
+
+```{r}
+
+#corpus <- Corpus(VectorSource(dt$tmp)) - dt obsolet, input wird direkt in corpus verwurstelt
+#corpus <- Corpus(VectorSource(rbind(blogs, news, twitter))) - simple corpus does not accept bigram nor trigram tokenizer
+
+corpus <- VCorpus(VectorSource(rbind(news, twitter))) # VCorpus does accept bigram and trigram tokenizer, but is very slow
+#corpus <- VCorpus(VectorSource(traindata)) # VCorpus does accept bigram and trigram tokenizer, but is very slow
+
+#dbCreate("pcorpusDB")
+#corpus <- dbInit("pcorpusDB")
+#corpus <- PCorpus(VectorSource(traindata), dbControl=list(dbName="pcorpusDB", dbType="DB1"))
+#corpus <- PCorpus(VectorSource(rbind(blogs, news, twitter))) # PCorpus might be the final solution for the complete date
+#corpus <- PCorpus(DirSource("traindata", encoding="UTF-8",mode="text"), dbControl=list(dbName="pcorpus.db", dbType="DB1"))
+
+```
+
+## Clean the text corpus
+```{r}
+
+#cleaning start
+#inspect(corpus[1:5]) # initial state Corpus
+inspect(corpus[[5]]) # initial state of fifth entry VCorpus
+
+corpusClean = tm_map(corpus, content_transformer(tolower))
+rm(corpus)
+
+## remove https,www, hastags, some strange characters etc 
+removeURL <- function(x) gsub("(ht|f)tp(s?)://\\S+", "", x)
+removeWWW <- function(x) gsub("www(.*)[.][a-z]+|www.", " ", x)
+removeTagsAndHandles <- function(x) gsub("[@#]\\S+", "", x)
+removeTwitterRT <- function(x) gsub("^rt |^rt:", " ", x)
+removeDash <- function(x) gsub("–|_|—", " ", x)
+trim <- function (x) gsub("^\\s+|\\s+$", "", x)
+	
+ 
+corpusClean <- tm_map(corpusClean, removeURL)
+corpusClean <- tm_map(corpusClean, removeWWW)
+corpusClean <- tm_map(corpusClean, removeTagsAndHandles)
+corpusClean <- tm_map(corpusClean, removeTwitterRT)
+corpusClean <- tm_map(corpusClean, removeDash)
+
+corpusClean = tm_map(corpusClean, removeWords, profanitywords$V1) ## ideal: remove line where there is a profanity word
+corpusClean = tm_map(corpusClean, removeNumbers) ## maybe translate numbers to words instead?
+corpusClean = tm_map(corpusClean, removePunctuation)  
+corpusClean = tm_map(corpusClean, stripWhitespace)
+corpusClean = tm_map(corpusClean, trim)
+corpusClean <- tm_map(corpusClean, PlainTextDocument)
+
+##corpusClean = tm_map(corpusClean, removeWords, stopwords("english"))
+##corpusClean <- tm_map(corpusClean, stemDocument, "english")
+##corpusClean = tm_map(corpusClean, removePunctuation, preserve_intra_word_contractions = TRUE, preserve_intra_word_dashes = TRUE) ## will also remove hashtags
+##corpusClean <- tm_map(corpusClean, PlainTextDocument) # needs to be converted if VCorpus to be able to do DTM or actualle in case tolower is not sourrounded by content_transformer, because this destroys the corpus somehow
+
+inspect(corpusClean[[5]]) # final state of fifth entry VCorpus after cleaning
+
+rm(profanitywords)
+``` 
+
+## Tokenization 
+A token is a meaningful unit of text to be used for further analysis. Tokenization is the process of splitting text into tokens. In this case we split the textbody into unigrams (one word), bigrams (two words) and trigrams (three words).
+
+```{r}
+#Unigrams (no extra tokenizer needed as default for tm package)
+unigramdtm <- TermDocumentMatrix(corpusClean, control = list(wordLengths = c(1, 15)))
+#unigramdtm
+
+#Bigrams
+bigramTokenizer <- function(x) { unlist(lapply(ngrams(words(x), 2), paste, collapse = " "), use.names = FALSE) }
+bigramdtm <- TermDocumentMatrix(corpusClean, control = list(wordLengths = c(3, 30),tokenize = bigramTokenizer))
+
+#Trigrams
+trigramTokenizer <- function(x) { unlist(lapply(ngrams(words(x), 3), paste, collapse = " "), use.names = FALSE) }
+trigramdtm <- TermDocumentMatrix(corpusClean, control = list(wordLengths = c(5, 45),tokenize = trigramTokenizer))
+
+rm(corpusClean)
+```
+
+As result of the tokenziation of the 30.000 sample documents (text lines) there are
+
+-  54.217 unigrams,
+- 399.296 bigrams and
+- 685.765 trigrams 
+
+As result of the tokenziation of the ca 135.000 sample documents (text lines) there are
+
+-   95.500 unigrams,
+-  915.000 bigrams and
+- 1,750.00 trigrams 
+
+As result of the tokenziation of the ca 4,720.296 twitter and news documents (text lines) there are
+
+-    644.762 unigrams,
+- 10.094.096 bigrams and
+- 29,407.533 trigrams 
+
+
+## Explorative Analysis
+How frequently do unigrams, bigrams and trigrams appear in the data set?
+
+```{r}
+#Unigrams
+unigramdtm <- sort(slam::row_sums(unigramdtm), decreasing=T)
+unigram <- data.table(tok = names(unigramdtm), freq = unigramdtm)
+
+ggplot(unigram[1:25,], aes(x = reorder(tok,freq), y = freq)) + coord_flip() +
+     geom_bar(stat = "identity", fill = "steelblue") + theme_bw() +
+     ggtitle("Frequency of unigrams: Top 25") +labs(x = "", y = "")
+
+rm(unigramdtm)
+fwrite(unigram, file = "unigram1.csv")
+
+#Bigrams
+bigramdtm <- sort(slam::row_sums(bigramdtm), decreasing=T)
+bigram <- data.table(tok = names(bigramdtm), freq = bigramdtm)
+
+ggplot(bigram[1:25,], aes(x = reorder(tok,freq), y = freq)) + coord_flip() +
+     geom_bar(stat = "identity", fill = "darkgreen") + theme_bw() +
+     ggtitle("Frequency of bigrams: Top 25") +labs(x = "", y = "")
+
+rm(bigramdtm)
+fwrite(bigram, file = "bigram1.csv")
+
+#Trigrams
+trigramRowSums <- sort(slam::row_sums(trigramdtm), decreasing=T)
+trigram <- data.table(tok = names(trigramRowSums), freq = trigramRowSums)
+
+ggplot(trigram[1:25,], aes(x = reorder(tok,freq), y = freq)) + coord_flip() +
+     geom_bar(stat = "identity", fill = "coral") + theme_bw() +
+     ggtitle("Frequency of trigrams: Top 25") +labs(x = "", y = "")
+
+rm(trigramdtm)
+fwrite(trigram, file = "trigram1.csv")
+```
+
+
+
+## Stupid Back-off Model
+
+
+### Split token in prefix and rest for trigrams and bigrams
+
+```{r}
+splitTokenTrigram = function(x){
+# splits the token in to the prefix (two first words of a trigram) and the rest (the third word)
+    prefix = character(nrow(x))
+    rest = character(nrow(x))
+    tmp <- strsplit(x$tok, " ", fixed=TRUE)
+
+    for(i in 1:nrow(x)){
+        prefix[i] = paste(tmp[[i]][1],tmp[[i]][2])
+        rest[i] = tmp[[i]][3]
+    }
+    x$prefix <- prefix
+    x$rest <- rest
+    #list(prefix=prefix, rest=rest)
+    return(x)
+}
+
+trigram <- splitTokenTrigram(trigram)
+```
+
+```{r}
+splitTokenBigram = function(x){
+# splits the token in to the prefix (first word of a bigram) and the rest (the second word)
+    prefix = character(nrow(x))
+    rest = character(nrow(x))
+    tmp <- strsplit(x$tok, " ", fixed=TRUE)
+
+    for(i in 1:nrow(x)){
+        prefix[i] = tmp[[i]][1]
+        rest[i] = tmp[[i]][2]
+    }
+    x$prefix <- prefix
+    x$rest <- rest
+    #list(prefix=prefix, rest=rest)
+    return(x)
+}
+
+bigram <- splitTokenBigram(bigram)
+```
+
+
+### Calculate score based on relative frequency
+
+#Calculate score for trigrams
+```{r}
+setkey(trigram, prefix)
+setkey(bigram, tok)
+trigram <- trigram[bigram,nomatch=0]  # get the frequency from the related bigram
+
+# skip unnecesary columns
+trigram$prefixfreq <- trigram$i.freq
+trigram$i.freq <- NULL
+trigram$i.prefix <- NULL
+trigram$i.rest <- NULL
+#trigram$i.V1 <- NULL
+#trigram$V1 <- NULL
+
+# calculate score finally
+trigram$score <- trigram$freq / trigram$prefixfreq
+trigram <- trigram[order(trigram$prefix, -trigram$score)]
+fwrite(trigram, file = "trigram2.csv")
+
+#reducing file to something bearable for shiny
+tmp <- trigram[,head(.SD, 10), by=prefix]  # reduces to top 10 scores per prefix, results in 60% of ca 30 million
+rm(trigram)
+
+#f1 <-tmp[tmp$freq == 1,]  #5,8 million trigrams with frequency = 1, nearly 50%!
+tmp <-tmp[!tmp$freq == 1,] #remove all occurences with frequency 1
+#f2 <-tmp[tmp$freq == 2,]  #5,8 million trigrams with frequency = 2
+tmp <-tmp[!tmp$freq == 2,] #remove all occurences with frequency 2
+
+tmp$tok <- NULL            #skip columns which are not strictly relevant for shiny
+tmp$freq <- NULL
+tmp$prefixfreq <- NULL
+
+fwrite(tmp, file = "trigram.csv") # final file = input for shiny app
+rm(tmp)
+```
+
+```{r}
+#Calculate score for bigrams
+
+setkey(bigram, prefix)
+setkey(unigram, tok)
+bigram <- bigram[unigram,nomatch=0]
+#View(bigram)
+
+bigram$prefixfreq <- bigram$i.freq
+bigram$i.freq <- NULL
+#bigram$V1 <- NULL
+
+# recommended value of 0.4 for lambda
+bigram$score <- 0.4 * bigram$freq / bigram$prefixfreq
+bigram <- bigram[order(bigram$prefix, -bigram$score)]
+fwrite(bigram, file = "bigram2.csv")
+
+#reducing file to something bearable for shiny
+tmp <- bigram[,head(.SD, 10), by=prefix]  # reduces to top 10 scores per prefix
+rm(bigram)
+
+#f1 <-tmp[tmp$freq == 1,]  
+tmp <-tmp[!tmp$freq == 1,] #remove all occurences with frequency 1
+
+tmp$tok <- NULL            #skip columns which are not strictly relevant for shiny
+tmp$freq <- NULL
+tmp$prefixfreq <- NULL
+
+fwrite(tmp, file = "bigram.csv")
+rm(tmp)
+```
+
+
+```{r}
+#Calculate score for unigrams
+options(scipen = 999)
+
+# recommended value of 0.4 for lambda
+unigram$score <- 0.4 * 0.4 * unigram$freq / sum(unigram$freq)
+unigram <- unigram[order(-unigram$score)]
+fwrite(unigram, file = "unigram2.csv")
+
+#reducing file to something bearable for shiny
+tmp <- head(unigram, 10)
+fwrite(tmp, file = "unigram.csv")
+```
